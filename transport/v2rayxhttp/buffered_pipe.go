@@ -8,18 +8,34 @@ import (
 // bufferedPipe is an io.Pipe with a buffer: Write returns as soon as the data is queued instead
 // of waiting for the HTTP transport to pick it up, so the producer and the HTTP framing run
 // concurrently. Write blocks only while the buffer is full.
+//
+// The buffer starts small and grows on demand up to its limit, since most streams (DNS, UDP
+// flows, idle connections) never queue more than a few KB, and it is released as soon as the
+// pipe is finished.
 type bufferedPipe struct {
 	access       sync.Mutex
 	cond         *sync.Cond
 	data         []byte
+	limit        int
 	start, count int
 	writeClosed  bool
 	writeErr     error // returned by Read once the buffer is drained
 	readErr      error // returned by Write, set when the reader goes away
 }
 
+const pipeInitialSize = 4 << 10
+
+// grow doubles the buffer, up to the limit, keeping the queued bytes in order.
+func (p *bufferedPipe) grow() {
+	next := make([]byte, min(len(p.data)*2, p.limit))
+	first := min(p.count, len(p.data)-p.start)
+	copy(next, p.data[p.start:p.start+first])
+	copy(next[first:], p.data[:p.count-first])
+	p.data, p.start = next, 0
+}
+
 func newBufferedPipe(size int) (*pipeReader, *pipeWriter) {
-	pipe := &bufferedPipe{data: make([]byte, size)}
+	pipe := &bufferedPipe{data: make([]byte, min(size, pipeInitialSize)), limit: size}
 	pipe.cond = sync.NewCond(&pipe.access)
 	return &pipeReader{pipe}, &pipeWriter{pipe}
 }
@@ -30,6 +46,10 @@ func (p *bufferedPipe) write(b []byte) (int, error) {
 	written := 0
 	for len(b) > 0 {
 		for p.count == len(p.data) && p.readErr == nil && !p.writeClosed {
+			if len(p.data) < p.limit {
+				p.grow()
+				break
+			}
 			p.cond.Wait()
 		}
 		if p.readErr != nil {
@@ -59,6 +79,7 @@ func (p *bufferedPipe) read(b []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 	if p.count == 0 {
+		p.data = nil
 		if p.writeErr != nil {
 			return 0, p.writeErr
 		}
@@ -86,6 +107,7 @@ func (r *pipeReader) CloseWithError(err error) error {
 	r.pipe.access.Lock()
 	if r.pipe.readErr == nil {
 		r.pipe.readErr = err
+		r.pipe.data = nil
 	}
 	r.pipe.cond.Broadcast()
 	r.pipe.access.Unlock()

@@ -286,6 +286,11 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 		ctx, conn = canceler.NewPacketConn(ctx, conn, udpTimeout)
 	}
 	destination := bufio.NewPacketConn(remotePacketConn)
+	if udpTimeout == 0 || udpTimeout > unansweredUDPTimeout {
+		watched := newAnswerWatchPacketConn(destination)
+		go watched.watch(ctx, conn)
+		destination = watched
+	}
 	var done atomic.Bool
 	go m.packetConnectionCopy(ctx, conn, destination, false, &done, onClose)
 	go m.packetConnectionCopy(ctx, destination, conn, true, &done, onClose)
@@ -543,3 +548,71 @@ var (
 	_ tun.SpliceSocket = (*trackedConn)(nil)
 	_ tun.SpliceSocket = (*trackedPacketConn)(nil)
 )
+
+// unansweredUDPTimeout is how long a UDP flow may stay idle before the remote has sent anything
+// back. Programs that retry from a new source port (hole punching, probes) otherwise pile up
+// flows for the whole UDP timeout, or forever without one, and each one holds an outbound stream
+// and its buffers. Once the remote answers, the flow goes back to the regular timeout.
+const unansweredUDPTimeout = 30 * time.Second
+
+type answerWatchPacketConn struct {
+	N.NetPacketConn
+	answered   atomic.Bool
+	lastActive atomic.Int64
+}
+
+func newAnswerWatchPacketConn(conn N.NetPacketConn) *answerWatchPacketConn {
+	c := &answerWatchPacketConn{NetPacketConn: conn}
+	c.lastActive.Store(time.Now().UnixNano())
+	return c
+}
+
+// watch closes both sides when the remote stays silent and nothing is sent either.
+func (c *answerWatchPacketConn) watch(ctx context.Context, source io.Closer) {
+	ticker := time.NewTicker(unansweredUDPTimeout / 3)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if c.answered.Load() {
+			return
+		}
+		if time.Since(time.Unix(0, c.lastActive.Load())) >= unansweredUDPTimeout {
+			common.Close(source, c.NetPacketConn)
+			return
+		}
+	}
+}
+
+func (c *answerWatchPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	destination, err := c.NetPacketConn.ReadPacket(buffer)
+	if err == nil {
+		c.answered.Store(true)
+	}
+	return destination, err
+}
+
+func (c *answerWatchPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	n, addr, err := c.NetPacketConn.ReadFrom(p)
+	if err == nil {
+		c.answered.Store(true)
+	}
+	return n, addr, err
+}
+
+func (c *answerWatchPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	c.lastActive.Store(time.Now().UnixNano())
+	return c.NetPacketConn.WritePacket(buffer, destination)
+}
+
+func (c *answerWatchPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	c.lastActive.Store(time.Now().UnixNano())
+	return c.NetPacketConn.WriteTo(p, addr)
+}
+
+func (c *answerWatchPacketConn) Upstream() any {
+	return c.NetPacketConn
+}
