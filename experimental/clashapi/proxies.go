@@ -230,7 +230,11 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*time.Duration(timeout))
 		defer cancel()
 
-		delay, err := urltest.URLTest(ctx, url, proxy)
+		test := urltest.URLTest
+		if query.Get("unified") == "true" {
+			test = urltest.URLTestUnified
+		}
+		delay, err := test(ctx, url, proxy)
 		defer func() {
 			realTag := group.RealTag(proxy, N.NetworkTCP)
 			if err != nil {

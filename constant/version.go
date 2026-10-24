@@ -1,3 +1,3 @@
 package constant
 
-var Version = "unknown"
+var Version = "original-singbox-x"

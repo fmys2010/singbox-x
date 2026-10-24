@@ -3,6 +3,7 @@ package urltest
 import (
 	"context"
 	"crypto/tls"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -97,7 +98,20 @@ func URLTest(ctx context.Context, link string, detour N.Dialer) (uint16, error) 
 	return urlTest(ctx, link, detour)
 }
 
+// URLTestUnified is URLTest without the handshakes: it sends one request
+// to open the connection (TCP, TLS and the proxy's own handshake), then
+// times a second request on the same connection, like Clash's
+// unified-delay. If the server will not reuse the connection, it falls back
+// to the first request's time.
+func URLTestUnified(ctx context.Context, link string, detour N.Dialer) (uint16, error) {
+	return urlTestWith(ctx, link, detour, true)
+}
+
 func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err error) {
+	return urlTestWith(ctx, link, detour, false)
+}
+
+func urlTestWith(ctx context.Context, link string, detour N.Dialer, unified bool) (t uint16, err error) {
 	if link == "" {
 		link = "https://www.gstatic.com/generate_204"
 	}
@@ -149,7 +163,19 @@ func urlTest(ctx context.Context, link string, detour N.Dialer) (t uint16, err e
 	if err != nil {
 		return
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	t = uint16(time.Since(start) / time.Millisecond)
+	if !unified || resp.Close {
+		return
+	}
+	// The transport hands the same connection back for the second request.
+	again := time.Now()
+	resp, err2 := client.Do(req.Clone(ctx))
+	if err2 != nil {
+		return
+	}
+	resp.Body.Close()
+	t = uint16(time.Since(again) / time.Millisecond)
 	return
 }
