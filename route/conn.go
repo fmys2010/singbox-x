@@ -282,15 +282,20 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 	} else if metadata.RouteOriginalDestination.IsValid() && metadata.RouteOriginalDestination != metadata.Destination {
 		remotePacketConn = bufio.NewDestinationNATPacketConn(bufio.NewPacketConn(remotePacketConn), metadata.Destination, metadata.RouteOriginalDestination)
 	}
-	if udpTimeout > 0 {
+	if udpTimeout == 0 || udpTimeout > unansweredUDPTimeout {
+		// no timeout means "until closed"; the timer needs a finite value to go back to
+		finalTimeout := udpTimeout
+		if finalTimeout == 0 {
+			finalTimeout = 365 * 24 * time.Hour
+		}
+		ctx, conn = canceler.NewPacketConn(ctx, conn, unansweredUDPTimeout)
+		if timer, isTimer := common.Cast[canceler.PacketConn](conn); isTimer {
+			conn = &answerPacketConn{PacketConn: conn, timer: timer, timeout: finalTimeout}
+		}
+	} else if udpTimeout > 0 {
 		ctx, conn = canceler.NewPacketConn(ctx, conn, udpTimeout)
 	}
 	destination := bufio.NewPacketConn(remotePacketConn)
-	if udpTimeout == 0 || udpTimeout > unansweredUDPTimeout {
-		watched := newAnswerWatchPacketConn(destination)
-		go watched.watch(ctx, conn)
-		destination = watched
-	}
 	var done atomic.Bool
 	go m.packetConnectionCopy(ctx, conn, destination, false, &done, onClose)
 	go m.packetConnectionCopy(ctx, destination, conn, true, &done, onClose)
@@ -551,68 +556,28 @@ var (
 
 // unansweredUDPTimeout is how long a UDP flow may stay idle before the remote has sent anything
 // back. Programs that retry from a new source port (hole punching, probes) otherwise pile up
-// flows for the whole UDP timeout, or forever without one, and each one holds an outbound stream
-// and its buffers. Once the remote answers, the flow goes back to the regular timeout.
+// flows for the whole UDP timeout, and each one holds an outbound stream and its buffers. Once the
+// remote answers, the flow goes back to the regular timeout.
 const unansweredUDPTimeout = 30 * time.Second
 
-type answerWatchPacketConn struct {
-	N.NetPacketConn
-	answered   atomic.Bool
-	lastActive atomic.Int64
+// answerPacketConn sits on the client side, which already carries the idle timer, so it does not
+// hide any fast path of the outbound connection. The first packet delivered to the client means
+// the remote answered.
+type answerPacketConn struct {
+	N.PacketConn
+	timer    canceler.PacketConn
+	timeout  time.Duration
+	answered atomic.Bool
 }
 
-func newAnswerWatchPacketConn(conn N.NetPacketConn) *answerWatchPacketConn {
-	c := &answerWatchPacketConn{NetPacketConn: conn}
-	c.lastActive.Store(time.Now().UnixNano())
-	return c
-}
-
-// watch closes both sides when the remote stays silent and nothing is sent either.
-func (c *answerWatchPacketConn) watch(ctx context.Context, source io.Closer) {
-	ticker := time.NewTicker(unansweredUDPTimeout / 3)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		if c.answered.Load() {
-			return
-		}
-		if time.Since(time.Unix(0, c.lastActive.Load())) >= unansweredUDPTimeout {
-			common.Close(source, c.NetPacketConn)
-			return
-		}
+func (c *answerPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	err := c.PacketConn.WritePacket(buffer, destination)
+	if err == nil && !c.answered.Load() && !c.answered.Swap(true) {
+		c.timer.SetTimeout(c.timeout)
 	}
+	return err
 }
 
-func (c *answerWatchPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
-	destination, err := c.NetPacketConn.ReadPacket(buffer)
-	if err == nil {
-		c.answered.Store(true)
-	}
-	return destination, err
-}
-
-func (c *answerWatchPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	n, addr, err := c.NetPacketConn.ReadFrom(p)
-	if err == nil {
-		c.answered.Store(true)
-	}
-	return n, addr, err
-}
-
-func (c *answerWatchPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
-	c.lastActive.Store(time.Now().UnixNano())
-	return c.NetPacketConn.WritePacket(buffer, destination)
-}
-
-func (c *answerWatchPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	c.lastActive.Store(time.Now().UnixNano())
-	return c.NetPacketConn.WriteTo(p, addr)
-}
-
-func (c *answerWatchPacketConn) Upstream() any {
-	return c.NetPacketConn
+func (c *answerPacketConn) Upstream() any {
+	return c.PacketConn
 }
