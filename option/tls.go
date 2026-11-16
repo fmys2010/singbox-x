@@ -255,7 +255,7 @@ type OutboundRealityOptions struct {
 	Enabled   bool   `json:"enabled,omitempty"`
 	PublicKey string `json:"public_key,omitempty"`
 	ShortID   string `json:"short_id,omitempty"`
-	// SupportX25519MLKEM768 keeps the X25519MLKEM768 key share in the ClientHello, newer Xray-core
-	// REALITY servers reject ClientHellos without it.
+	// SupportX25519MLKEM768 is accepted for compatibility and has no effect: the X25519MLKEM768 key
+	// share of the uTLS fingerprint is always kept in the ClientHello.
 	SupportX25519MLKEM768 bool `json:"support_x25519mlkem768,omitempty"`
 }

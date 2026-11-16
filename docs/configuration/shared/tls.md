@@ -835,9 +835,7 @@ A hexadecimal string with zero to eight digits.
 
 ==Client only==
 
-Keep the `X25519MLKEM768` key share of the uTLS fingerprint in the ClientHello instead of removing it.
-
-Recent Xray-core REALITY servers reject ClientHellos that do not carry it, enable this when connecting to them (mihomo: `support-x25519mlkem768`).
+Accepted for compatibility, no effect: the `X25519MLKEM768` key share of the uTLS fingerprint is always kept in the ClientHello (mihomo: `support-x25519mlkem768`).
 
 #### max_time_difference
 
