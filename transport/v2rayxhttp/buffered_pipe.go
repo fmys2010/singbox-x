@@ -100,12 +100,16 @@ func (r *pipeReader) Read(b []byte) (int, error) { return r.pipe.read(b) }
 func (r *pipeReader) Close() error { return r.CloseWithError(nil) }
 
 // CloseWithError makes pending and later writes fail with err (io.ErrClosedPipe when nil).
+//
+// net/http closes a request body when the request fails, usually before the caller learns why.
+// A real cause arriving afterwards replaces that bare io.ErrClosedPipe, so writers report the
+// failure instead of "read/write on closed pipe".
 func (r *pipeReader) CloseWithError(err error) error {
 	if err == nil {
 		err = io.ErrClosedPipe
 	}
 	r.pipe.access.Lock()
-	if r.pipe.readErr == nil {
+	if r.pipe.readErr == nil || (r.pipe.readErr == io.ErrClosedPipe && err != io.ErrClosedPipe) {
 		r.pipe.readErr = err
 		r.pipe.data = nil
 	}

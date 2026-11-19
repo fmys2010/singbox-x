@@ -1,6 +1,7 @@
 package v2rayxhttp
 
 import (
+	"errors"
 	"bytes"
 	"crypto/rand"
 	"io"
@@ -50,4 +51,18 @@ func TestBufferedPipeReaderClose(t *testing.T) {
 	}
 	_, err := reader.Read(make([]byte, 1))
 	require.Error(t, err)
+}
+
+func TestBufferedPipeCauseAfterClose(t *testing.T) {
+	reader, writer := newBufferedPipe(10)
+	reader.Close()
+	cause := errors.New("dial tcp: i/o timeout")
+	reader.CloseWithError(cause)
+	if _, err := writer.Write([]byte("x")); err != cause {
+		t.Fatalf("write error = %v, want the cause", err)
+	}
+	reader.CloseWithError(errors.New("later"))
+	if _, err := writer.Write([]byte("x")); err != cause {
+		t.Fatalf("a later cause replaced the first: %v", err)
+	}
 }
